@@ -1,236 +1,222 @@
-Parfait. Voilà une **roadmap pragmatique** (façon sprints) pour aller jusqu’au vol autonome “position → trajectoire → suivi”, en restant léger pour l’ESP32 + PlatformIO. Chaque étape a : objectifs, livrables, tests, et snippets à poser (sans tout réécrire).
+# ESP32 Drone Flight Controller — Roadmap
+
+This document outlines the development roadmap for building a **custom cascaded flight controller** on an ESP32 (PlatformIO + Arduino framework).  
+The goal is to fly a rectangular quadrotor (130×100 mm motor spacing) with **position → trajectory → tracking** control.
 
 ---
 
-# Sprint 0 — Base projet & arborescence
+# Milestone 0 — Project base & structure
 
-**Objectifs**
+**Goals**
+- Clean PlatformIO project, FreeRTOS tasks, logging, centralized constants.
 
-* Projet PIO propre, tâches temps réel, logs, et constantes centralisées.
+**Deliverables**
+- `src/main.cpp` (FreeRTOS tasks or timers), `include/config.hpp`, `lib/` modules.
 
-**Livrables**
-
-* `src/main.cpp` (tasks FreeRTOS ou timers), `include/config.hpp`, `lib/` modules.
-
-**Arbo**
-
+**Structure**
 ```
+
 src/main.cpp
 include/config.hpp
 lib/
-  drivers/imu.hpp, esc.hpp
-  math/vec.hpp, mat.hpp, filters.hpp
-  control/rate.hpp, attitude.hpp, position.hpp, traj.hpp
-  mix/mixer_rect.hpp, loopshaper.hpp
-```
+drivers/imu.hpp, esc.hpp
+math/vec.hpp, mat.hpp, filters.hpp
+control/rate.hpp, attitude.hpp, position.hpp, traj.hpp
+mix/mixer\_rect.hpp, loopshaper.hpp
+
+````
 
 **Tests**
-
-* Build OK, tick “rate” à 500–1000 Hz (LED ou counter Serial 1 Hz).
+- Successful build, “rate task” ticks at 500–1000 Hz (LED blink or Serial counter).
 
 ---
 
-# Sprint 1 — Drivers & timing
+# Milestone 1 — Drivers & timing
 
-**Objectifs**
+**Goals**
+- IMU (I2C/SPI), ESC outputs (PWM/DShot via LEDC), high-rate timers.
 
-* IMU (I2C/SPI), ESC (PWM/DShot via LEDC), timers high-rate.
+**Deliverables**
+- `drivers/imu.hpp` (read gyro/accel, calibration offsets),
+- `drivers/esc.hpp` (write 4× PWM/DShot, arm/disarm, map 0–1 → µs).
 
-**Livrables**
-
-* `drivers/imu.hpp` (read gyro/accel, calib offsets),
-* `drivers/esc.hpp` (write 4× PWM/DShot, arm/disarm, map 0–1 → µs).
-
-**Snippets à placer**
-
-* ISR/Timer `rate_task()` pour 500–1000 Hz.
-* `esc.writeAll(u0,u1,u2,u3)`.
+**Snippets**
+- ISR/Timer `rate_task()` at 500–1000 Hz,
+- `esc.writeAll(u0,u1,u2,u3)`.
 
 **Tests**
-
-* Gyro/acc lisibles, ESC armables, variation commande visible sans hélices.
+- IMU values readable, ESCs arm, motor command variation visible (without props).
 
 ---
 
-# Sprint 2 — Estimation d’attitude (léger)
+# Milestone 2 — Attitude estimation
 
-**Objectifs**
+**Goals**
+- Lightweight complementary filter / Mahony filter (no heavy quaternions).
 
-* Filtre complémentaire/MAHONY simple (pas de quaternions lourds si tu veux).
-
-**Livrables**
-
-* `filters.hpp` : LPF 1er ordre, complementary filter.
-* `state`: `R` (3×3) + `omega` (rad/s). Option yaw magnétomètre si dispo.
+**Deliverables**
+- `filters.hpp`: 1st-order LPF + complementary filter,
+- `state`: rotation matrix `R` (3×3) + angular velocity `omega` (rad/s), optional magnetometer yaw.
 
 **Tests**
-
-* Bouger la frame à la main → angles stables, latence faible, pas d’explosion.
-
----
-
-# Sprint 3 — Mixer + Loop-shaper (déjà quasi prêt)
-
-**Objectifs**
-
-* Mixer rectangle 130×100 mm, désaturation, shaping (EMA+slew).
-
-**Livrables**
-
-* `mix/mixer_rect.hpp` avec ton `Binv` + `mixAndDesat(...)`.
-* `loopshaper.hpp` : `motorEMAstep()` puis `motorSlewStep()`.
-
-**Tests (sans hélices !)**
-
-* Step de couple sur un axe (ex. yaw) → variation relative des 4 sorties est logique (sanity signs).
-* Saturation : forcer >1 → vérif que la désat sacrifie **yaw** en dernier.
+- Move frame by hand → stable angles, low latency, no divergence.
 
 ---
 
-# Sprint 4 — Boucle **Rate** (ω) (la plus critique)
+# Milestone 3 — Mixer + Loop-shaper
 
-**Objectifs**
+**Goals**
+- Mixer for rectangular geometry (130×100 mm), desaturation, shaping (EMA + slew).
 
-* PI (voire PID léger) stabilisant en tenant les bras.
+**Deliverables**
+- `mix/mixer_rect.hpp` with precomputed `Binv` + `mixAndDesat(...)`,
+- `loopshaper.hpp`: `motorEMAstep()` and `motorSlewStep()`.
 
-**Livrables**
+**Tests (without props!)**
+- Step torque on yaw → relative motor variations consistent (sanity signs),
+- Force saturation >1 → check yaw sacrificed last.
 
-* `control/rate.hpp`:
+---
 
-  * `tau = Kp*(w_des-w) + Ki*Iw + w×(Jw)`
-  * Anti-windup + clamp.
+# Milestone 4 — Rate loop (ω)
 
-**Snippets (à mettre dans `rate_task`)**
+**Goals**
+- PI (or lightweight PID) stabilizing when holding the frame.
 
+**Deliverables**
+- `control/rate.hpp`:
+  - `tau = Kp*(w_des - w) + Ki*Iw + w×(Jw)`,
+  - Anti-windup + clamp.
+
+**Snippets (in `rate_task`)**
 ```cpp
-// Read omega (gyro), compute w_des from attitude loop (pour l’instant 0)
 Vec3 ew = w_des - w;
 Iw += ew * dt; Iw = clamp(Iw, -IwMax, +IwMax);
 Vec3 tau = KPw*ew + KIw*Iw + cross(w, J*w);
-Vec4 u = mixAndDesat(tau, F_hover, geom); // F_hover=m*g
+Vec4 u = mixAndDesat(tau, F_hover, geom); // F_hover = m*g
 u = motorEMAstep(ema, u);
 u = motorSlewStep(u, u, 0.02f);
 esc.writeAll(u);
-```
+````
 
 **Tests**
 
-* Sans hélices, PID ne “part” pas (monitor τ).
-* Avec hélices **attachées** (enchaîné au sol), fais petits steps ω\_des (±30–60°/s). Ajuste `KPw` jusqu’avant vibration, puis ajoute `KIw`.
+* Without props: PID output bounded (monitor τ).
+* With props (tied down): small ω\_des steps (±30–60°/s). Tune `KPw` to near oscillation, back off 20–30%, then add `KIw`.
 
 ---
 
-# Sprint 5 — Boucle **Attitude** (R/q)
+# Milestone 5 — Attitude loop (R/q)
 
-**Objectifs**
+**Goals**
 
-* Contrôleur géométrique (SO(3)) → $w_{des}$.
+* Geometric controller (SO(3)) → compute ω\_des.
 
-**Livrables**
+**Deliverables**
 
 * `control/attitude.hpp`:
 
-  * `eR = 0.5*vee(Rd^T R - R^T Rd)`
+  * `eR = 0.5*vee(Rd^T R - R^T Rd)`,
   * `w_des = -K_R * eR + [0,0,yawRateRef]`.
 
 **Tests**
 
-* Tenir le drone, imposer Rd (petites inclinaisons), ω suit sans overshoot.
-* Limites : clamp ω\_des, clamp angles.
+* Hold frame, impose Rd (small inclinations), ω follows without overshoot,
+* Clamp ω\_des and max tilt angles.
 
 ---
 
-# Sprint 6 — Altitude (Z) + collectif
+# Milestone 6 — Altitude (Z) + collective
 
-**Objectifs**
+**Goals**
 
-* PID en Z (ou en accélération verticale) → calculer **F\_des**, mapping via **hover\_cmd** auto.
+* PID on Z (or vertical acceleration) → compute **F\_des**, map via auto `hover_cmd`.
 
-**Livrables**
+**Deliverables**
 
-* `control/position.hpp` (Z d’abord),
-* `collectiveDelta()` + `adaptHover()` (déjà fourni).
+* `control/position.hpp` (altitude first),
+* `collectiveDelta()` + `adaptHover()`.
 
 **Tests**
 
-* Throttle “auto-hover” mains au-dessus → le drone tient vers \~fixe (en extérieur éviter vent).
+* Auto-hover throttle (hands above drone) → drone maintains approximate height (\~fixed). Avoid outdoor wind initially.
 
 ---
 
-# Sprint 7 — XY position → thrust vector + Rd
+# Milestone 7 — XY position → thrust vector + Rd
 
-**Objectifs**
+**Goals**
 
-* Contrôleur PID (PDI) positionnel pour XY avec **option a\_r feed-forward**.
-* Conversion $\mathbf{t} = a_cmd + g\hat z$ → $F^{des}, R_{des}$ (avec yaw ref).
+* Position PID (PDI) for XY with optional acceleration feed-forward,
+* Convert \$\mathbf{t} = a\_{cmd} + g\hat z\$ → \$F^{des}, R\_{des}\$ (with yaw reference).
 
-**Livrables**
+**Deliverables**
 
-* `control/position.hpp`: `positionOuterLoop(...)` (déjà donné).
-* `control/traj.hpp`: générateur “trapezoidal velocity” 1D par axe → $(p_r, v_r, a_r)$.
+* `control/position.hpp`: `positionOuterLoop(...)`,
+* `control/traj.hpp`: trapezoidal velocity generator per axis → \$(p\_r, v\_r, a\_r)\$.
 
 **Tests**
 
-* D’abord XY **faible bande passante** (2–3 Hz), yaw fixe.
-* Waypoint à 1–2 m : le drone converge proprement (pas d’oscillation).
+* Start with low bandwidth XY (2–3 Hz), yaw fixed,
+* Waypoint at 1–2 m: drone converges smoothly without oscillation.
 
 ---
 
-# Sprint 8 — Trajectoires & gestion des modes
+# Milestone 8 — Trajectories & modes
 
-**Objectifs**
+**Goals**
 
-* Waypoint queue, S-curve, loiter, land, arm/disarm, failsafe.
+* Waypoint queue, S-curve generation, loiter, land, arming/disarming, failsafe.
 
-**Livrables**
+**Deliverables**
 
-* `traj.hpp` (segments pos/vel/acc),
-* `mode_manager.hpp` (ARMED, DISARMED, LOITER, GOTO, LAND),
-* `safety.hpp` (kill switch, timeout RC/telemetry, tilt > 60°, batterie basse).
+* `traj.hpp`: trajectory segments,
+* `mode_manager.hpp`: flight modes (ARMED, DISARMED, LOITER, GOTO, LAND),
+* `safety.hpp`: kill switch, RC/telemetry timeout, tilt >60°, low battery.
 
 **Tests**
 
-* Enchaîner 2–3 waypoints, pause (loiter), retour.
+* Execute sequence of waypoints, loiter, return.
 
 ---
 
-# Sprint 9 — Tuning & logs
+# Milestone 9 — Tuning & logging
 
-**Objectifs**
+**Goals**
 
-* Ajuster gains avec logs 50–100 Hz (UDP ou Serial).
-* Enregistrer : `t, p, v, R, w, pr, vr, Rd, w_des, F, u[4]`.
+* Tune gains with 50–100 Hz logs (UDP or Serial),
+* Log: `t, p, v, R, w, pr, vr, Rd, w_des, F, u[4]`.
 
-**Livrables**
+**Deliverables**
 
-* `logger.hpp` (CSV/UDP), script Python pour plots (optionnel).
+* `logger.hpp` (CSV/UDP),
+* Optional Python plotting script.
 
-**Procédure tuning rapide**
+**Tuning procedure**
 
-1. **Rate**: monte `KPw` jusqu’au bord de la vibration, recule 20–30 %, ajoute `KIw` (5–10 %/s).
-2. **Attitude**: `K_R` pour \~150–300 °/s à 15–20° d’erreur.
-3. **Z**: `Kp,Kd` pour montée propre, `Ki` petit si drift.
-4. **XY**: commence avec `Kp=2–3`, `Kd=2–4 s⁻¹`, `Ki=0–0.3 s⁻¹`, puis active `a_r`.
-
----
-
-## Checklists “go/no-go” (sécurité)
-
-* **Avant hélices**: IMU stable, τ borné, désat OK, arming lock.
-* **Première mise en gaz** (attaché): réponse rate, pas de sifflement fort.
-* **Premier vol**: mode “altitude hold” + attitude, pas de position XY.
-* **Position XY**: pas de rafales, BP basse, limites de tilt 25–30°.
-* **Failsafe**: test kill switch, perte com, batterie basse.
+1. **Rate**: increase `KPw` to edge of vibration, back off 20–30%, add `KIw` (5–10%/s).
+2. **Attitude**: set `K_R` for \~150–300 °/s at 15–20° error.
+3. **Altitude (Z)**: tune `Kp,Kd` for clean climb, small `Ki` if drift.
+4. **XY**: start with `Kp=2–3`, `Kd=2–4 s⁻¹`, `Ki=0–0.3 s⁻¹`, then enable `a_r`.
 
 ---
 
-## Prochaines actions (concrètes)
+## ✅ Safety checklists (go/no-go)
 
-1. Je te génère les **headers vides** suivants (avec seulement les signatures) pour que tu colles tes implémentations au fur et à mesure :
+* **Before props**: IMU stable, τ bounded, desaturation OK, arming lock works.
+* **First spool-up (tied down)**: rate loop responds, no high-pitched oscillation.
+* **First hover**: altitude hold + attitude only, no XY.
+* **XY control**: calm air, low bandwidth, tilt limit 25–30°.
+* **Failsafe**: test kill switch, comms loss, low battery.
+
+---
+
+## Next concrete actions
+
+1. Generate **empty headers** (signatures only) to progressively implement:
 
    * `drivers/esc.hpp`, `drivers/imu.hpp`
    * `control/rate.hpp`, `control/attitude.hpp`, `control/position.hpp`
    * `mix/mixer_rect.hpp`, `loopshaper.hpp`
-2. On pose le **timer 500 Hz** dans `main.cpp` (rate task) et on y branche **mixer + loopshaper** (en commande fixe) pour valider la chaîne jusqu’aux ESC.
 
-Si tu veux, dis-moi si tu pars en **PWM 1000–2000 µs** ou **DShot600** et quelle IMU tu utilises (MPU/BMI/ICM). Je te fournis les **snippets exacts** pour `esc.writeAll()` et l’init IMU, plus le `platformio.ini` minimal.
+2. Implement **500 Hz timer** in `main.cpp` (rate task), connect **mixer + loopshaper** (fixed command) to validate ESC pipeline.
